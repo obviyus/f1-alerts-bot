@@ -2,11 +2,15 @@ mod database;
 mod event_results;
 mod models;
 mod next_event;
+mod race_control_messages;
 
 use futures::prelude::*;
 use irc::client::prelude::*;
 use log::{error, info};
-use std::time::Duration;
+use std::{
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 #[tokio::main]
 async fn main() -> irc::error::Result<()> {
@@ -22,12 +26,14 @@ async fn main() -> irc::error::Result<()> {
     };
     info!("Command prefix: {}", command_prefix);
 
-    let channels = config
-        .channels()
-        .iter()
-        .map(|c| c.to_string())
-        .collect::<Vec<_>>();
-    info!("Joining channels: {}", channels.join(", "));
+    let channels = Arc::new(Mutex::new(
+        config
+            .channels()
+            .iter()
+            .map(|c| c.to_string())
+            .collect::<Vec<_>>(),
+    ));
+    info!("Joining channels: {}", channels.lock().unwrap().join(", "));
 
     match database::init_db() {
         Ok(_) => info!("Database initialized successfully."),
@@ -48,7 +54,10 @@ async fn main() -> irc::error::Result<()> {
     ))?;
 
     // Separate sender for tasks that need to be run in the background
-    let sender = client.sender();
+    let sender = Arc::new(Mutex::new(client.sender()));
+
+    let result_channels = channels.clone();
+    let result_sender = sender.clone();
 
     tokio::spawn(async move {
         // Small buffer to give the bot enough time to connect
@@ -64,8 +73,10 @@ async fn main() -> irc::error::Result<()> {
             match event_results::read_result().await {
                 Ok(result_string) => {
                     if let Some(result_string) = result_string {
-                        channels.iter().for_each(|channel| {
-                            sender
+                        result_channels.lock().unwrap().iter().for_each(|channel| {
+                            result_sender
+                                .lock()
+                                .unwrap()
                                 .send(Command::PRIVMSG(
                                     channel.to_string(),
                                     result_string.to_string(),
@@ -84,13 +95,77 @@ async fn main() -> irc::error::Result<()> {
             match database::next_event() {
                 Some((formatted_string, _event_name, event_time)) => {
                     if event_time - chrono::Utc::now() < chrono::Duration::minutes(5) {
-                        channels.iter().for_each(|channel| {
-                            sender
+                        result_channels.lock().unwrap().iter().for_each(|channel| {
+                            result_sender
+                                .lock()
+                                .unwrap()
                                 .send(Command::PRIVMSG(
                                     channel.to_string(),
                                     formatted_string.to_string(),
                                 ))
                                 .unwrap();
+                        });
+
+                        let message_channels = result_channels.clone();
+                        let message_sender = result_sender.clone();
+                        tokio::spawn(async move {
+                            let mut path: String;
+
+                            // Wait until session is in "Generating state"
+                            let mut interval = tokio::time::interval(Duration::from_secs(300));
+                            loop {
+                                interval.tick().await;
+
+                                // TODO: too much nesting
+                                match race_control_messages::is_session_generating().await {
+                                    Ok(session_path) => match session_path {
+                                        Some(resolved_path) => {
+                                            path = resolved_path;
+                                            break;
+                                        }
+                                        None => todo!(),
+                                    },
+                                    Err(e) => {
+                                        error!("Error checking session path: {}", e);
+                                    }
+                                }
+                            }
+
+                            // Poll the API for RaceControlMessages
+                            interval = tokio::time::interval(Duration::from_secs(10));
+                            let mut last: i64 = chrono::Utc::now().timestamp();
+                            loop {
+                                interval.tick().await;
+
+                                match race_control_messages::fetch_latest_race_control_message(
+                                    &path,
+                                )
+                                .await
+                                {
+                                    Ok(tuple) => {
+                                        if let Some((message, timestamp)) = tuple {
+                                            if timestamp > last {
+                                                last = timestamp;
+                                                message_channels.lock().unwrap().iter().for_each(
+                                                    |channel| {
+                                                        message_sender
+                                                            .lock()
+                                                            .unwrap()
+                                                            .send(Command::PRIVMSG(
+                                                                channel.to_string(),
+                                                                message.to_string(),
+                                                            ))
+                                                            .unwrap();
+                                                    },
+                                                );
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        error!("Error fetching RaceControlMessages: {}", e);
+                                    }
+                                }
+                            }
                         });
                     }
                 }

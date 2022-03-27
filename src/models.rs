@@ -144,3 +144,27 @@ pub struct Timetable {
     pub end_time: String,
     pub start_time: String,
 }
+
+#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RaceControlMessages {
+    #[serde(rename = "Messages")]
+    pub messages: Vec<Message>,
+}
+
+#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Message {
+    #[serde(rename = "Utc")]
+    pub utc: String,
+    #[serde(rename = "Category")]
+    pub category: String,
+    #[serde(rename = "Message")]
+    pub message: String,
+    #[serde(rename = "Flag")]
+    pub flag: Option<String>,
+    #[serde(rename = "Scope")]
+    pub scope: Option<String>,
+    #[serde(rename = "Sector")]
+    pub sector: Option<i64>,
+}
